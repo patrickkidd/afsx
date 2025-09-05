@@ -49,9 +49,7 @@ define('AFSX_ERROR_CACHE_PREFIX', 'afsx_error_');
 
 // Logging Configuration
 define('AFSX_LOG_OPTION', 'afsx_api_logs');
-define('AFSX_CACHE_LOG_OPTION', 'afsx_cache_logs');
 define('AFSX_MAX_LOG_ENTRIES', 100);
-define('AFSX_DEBUG_MODE', true); // Set to false to disable verbose cache logging
 
 class AFSX_Feed {
     
@@ -99,29 +97,20 @@ class AFSX_Feed {
         
         if ($bypass_cache) {
             // Clear the caches when bypassing to force fresh data
-            $this->log_cache_event('bypass', $cache_key, array('username' => $username, 'count' => $count));
             delete_transient($cache_key);
             delete_transient($error_cache_key);
-            $this->log_cache_event('delete', $cache_key, array('reason' => 'cache_bypass'));
-            $this->log_cache_event('delete', $error_cache_key, array('reason' => 'cache_bypass'));
         } else {
             // Check for successful cached data first
-            $this->log_cache_event('check', $cache_key, array('username' => $username, 'count' => $count));
             $cached_data = get_transient($cache_key);
             if ($cached_data !== false) {
-                $this->log_cache_event('hit', $cache_key, array('data_size' => strlen(serialize($cached_data))));
                 return $cached_data;
             }
-            $this->log_cache_event('miss', $cache_key, array('reason' => 'not_found'));
             
             // Check for cached errors to prevent rapid retries
-            $this->log_cache_event('check', $error_cache_key, array('type' => 'error_check'));
             $cached_error = get_transient($error_cache_key);
             if ($cached_error !== false) {
-                $this->log_cache_event('hit', $error_cache_key, array('error_type' => is_wp_error($cached_error) ? $cached_error->get_error_code() : 'unknown'));
                 return $cached_error;
             }
-            $this->log_cache_event('miss', $error_cache_key, array('reason' => 'no_error_cached'));
         }
         
         $feed_data = $this->fetch_x_feed($username, $count);
@@ -140,29 +129,10 @@ class AFSX_Feed {
             } else {
                 $cache_duration = AFSX_ERROR_CACHE_DURATION;
             }
-            
-            $this->log_cache_event('store', $error_cache_key, array(
-                'error_code' => $error_code,
-                'duration' => $cache_duration,
-                'expires_at' => time() + $cache_duration,
-                'error_message' => $feed_data->get_error_message()
-            ));
             set_transient($error_cache_key, $feed_data, $cache_duration);
         } else {
             // Cache successful data and clear any error cache
-            $data_size = strlen(serialize($feed_data));
-            $this->log_cache_event('store', $cache_key, array(
-                'duration' => $cache_time,
-                'expires_at' => time() + $cache_time,
-                'data_size' => $data_size,
-                'tweet_count' => isset($feed_data['data']) ? count($feed_data['data']) : 0
-            ));
             set_transient($cache_key, $feed_data, $cache_time);
-            
-            // Clear any error cache and log it
-            if (get_transient($error_cache_key) !== false) {
-                $this->log_cache_event('delete', $error_cache_key, array('reason' => 'successful_fetch'));
-            }
             delete_transient($error_cache_key);
         }
         
@@ -181,11 +151,9 @@ class AFSX_Feed {
         
         // Check for cached user ID first
         $user_cache_key = AFSX_USER_CACHE_PREFIX . $username;
-        $this->log_cache_event('check', $user_cache_key, array('username' => $username, 'type' => 'user_id'));
         $user_id = get_transient($user_cache_key);
         
         if ($user_id === false) {
-            $this->log_cache_event('miss', $user_cache_key, array('reason' => 'user_id_not_cached'));
             // User ID not cached, fetch it
             $url = AFSX_API_BASE_URL . '/users/by/username/' . $username;
             $user_response = $this->make_api_request($url, array(), $api_key, $api_secret, $access_token, $access_token_secret);
@@ -203,15 +171,7 @@ class AFSX_Feed {
             $user_id = $user_data['data']['id'];
             
             // Cache user ID for 24 hours
-            $this->log_cache_event('store', $user_cache_key, array(
-                'user_id' => $user_id,
-                'username' => $username,
-                'duration' => AFSX_USER_ID_CACHE_DURATION,
-                'expires_at' => time() + AFSX_USER_ID_CACHE_DURATION
-            ));
             set_transient($user_cache_key, $user_id, AFSX_USER_ID_CACHE_DURATION);
-        } else {
-            $this->log_cache_event('hit', $user_cache_key, array('user_id' => $user_id, 'username' => $username));
         }
         
         // Get user tweets
@@ -355,53 +315,6 @@ class AFSX_Feed {
         }
         
         update_option(AFSX_LOG_OPTION, $logs);
-    }
-    
-    private function log_cache_event($event_type, $cache_key, $details = array()) {
-        if (!AFSX_DEBUG_MODE) {
-            return;
-        }
-        
-        $logs = get_option(AFSX_CACHE_LOG_OPTION, array());
-        
-        $log_entry = array(
-            'timestamp' => time(),
-            'event_type' => $event_type,
-            'cache_key' => $cache_key,
-            'details' => $details,
-            'context' => $this->get_context()
-        );
-        
-        // Add to beginning of array
-        array_unshift($logs, $log_entry);
-        
-        // Keep only the most recent entries
-        if (count($logs) > AFSX_MAX_LOG_ENTRIES) {
-            $logs = array_slice($logs, 0, AFSX_MAX_LOG_ENTRIES);
-        }
-        
-        update_option(AFSX_CACHE_LOG_OPTION, $logs);
-    }
-    
-    private function get_context() {
-        // Determine the context of the cache operation
-        if (is_admin()) {
-            if (isset($_POST['force_refresh'])) {
-                return 'admin_force_refresh';
-            } elseif (isset($_POST['clear_cache'])) {
-                return 'admin_clear_cache';
-            } elseif (isset($_GET['afsx_bypass_cache'])) {
-                return 'admin_cache_bypass';
-            }
-            return 'admin_page_load';
-        }
-        
-        // Check if it's from a shortcode
-        if (doing_shortcode()) {
-            return 'shortcode';
-        }
-        
-        return 'unknown';
     }
     
     private function render_feed($feed_data) {
@@ -582,10 +495,6 @@ class AFSX_Feed {
             delete_option(AFSX_LOG_OPTION);
             echo '<div class="notice notice-success"><p>API logs cleared successfully.</p></div>';
         }
-        if (isset($_POST['clear_cache_logs'])) {
-            delete_option(AFSX_CACHE_LOG_OPTION);
-            echo '<div class="notice notice-success"><p>Cache logs cleared successfully.</p></div>';
-        }
         
         // Show bypass cache notice
         if (isset($_GET['afsx_bypass_cache']) && $_GET['afsx_bypass_cache'] === '1' && current_user_can(AFSX_ADMIN_CAPABILITY)) {
@@ -631,8 +540,6 @@ class AFSX_Feed {
             <?php $this->render_debug_info(); ?>
             
             <?php $this->render_api_logs(); ?>
-            
-            <?php $this->render_cache_logs(); ?>
             
         </div>
         <?php
@@ -923,127 +830,12 @@ class AFSX_Feed {
         <?php
     }
     
-    private function render_cache_logs() {
-        $logs = get_option(AFSX_CACHE_LOG_OPTION, array());
-        ?>
-        <div class="afsx-cache-logs">
-            <h3>Cache Activity Log</h3>
-            <?php if (AFSX_DEBUG_MODE): ?>
-                <form method="post" style="display: inline;">
-                    <input type="submit" name="clear_cache_logs" value="Clear Cache Logs" class="button" 
-                           onclick="return confirm('Are you sure you want to clear all cache logs?');" />
-                </form>
-                <p>Showing last <?php echo count($logs); ?> cache events (max <?php echo AFSX_MAX_LOG_ENTRIES; ?>):</p>
-                
-                <?php if (empty($logs)): ?>
-                    <p>No cache events logged yet.</p>
-                <?php else: ?>
-                    <table class="widefat">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Event</th>
-                                <th>Cache Key</th>
-                                <th>Context</th>
-                                <th>Details</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach (array_slice($logs, 0, 30) as $log): ?>
-                                <tr class="cache-event-<?php echo esc_attr($log['event_type']); ?>">
-                                    <td><?php echo date('M j, H:i:s', $log['timestamp']); ?></td>
-                                    <td>
-                                        <span class="cache-event-badge cache-event-<?php echo esc_attr($log['event_type']); ?>">
-                                            <?php echo esc_html(strtoupper($log['event_type'])); ?>
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <code><?php 
-                                            $display_key = str_replace(array(AFSX_CACHE_PREFIX, AFSX_USER_CACHE_PREFIX, AFSX_ERROR_CACHE_PREFIX), 
-                                                                     array('feed:', 'user:', 'error:'), 
-                                                                     $log['cache_key']);
-                                            echo esc_html($display_key);
-                                        ?></code>
-                                    </td>
-                                    <td><?php echo esc_html($log['context']); ?></td>
-                                    <td>
-                                        <?php 
-                                        $details = $log['details'];
-                                        $detail_parts = array();
-                                        
-                                        if (isset($details['username'])) {
-                                            $detail_parts[] = 'user: ' . $details['username'];
-                                        }
-                                        if (isset($details['count'])) {
-                                            $detail_parts[] = 'count: ' . $details['count'];
-                                        }
-                                        if (isset($details['duration'])) {
-                                            $detail_parts[] = 'expires: ' . human_time_diff(time(), time() + $details['duration']);
-                                        }
-                                        if (isset($details['data_size'])) {
-                                            $detail_parts[] = 'size: ' . size_format($details['data_size']);
-                                        }
-                                        if (isset($details['tweet_count'])) {
-                                            $detail_parts[] = 'tweets: ' . $details['tweet_count'];
-                                        }
-                                        if (isset($details['error_code'])) {
-                                            $detail_parts[] = 'error: ' . $details['error_code'];
-                                        }
-                                        if (isset($details['user_id'])) {
-                                            $detail_parts[] = 'ID: ' . $details['user_id'];
-                                        }
-                                        if (isset($details['reason'])) {
-                                            $detail_parts[] = $details['reason'];
-                                        }
-                                        
-                                        echo esc_html(implode(', ', $detail_parts));
-                                        ?>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                    
-                    <style>
-                    /* Cache event styling */
-                    .cache-event-badge {
-                        padding: 2px 6px;
-                        border-radius: 3px;
-                        font-size: 11px;
-                        font-weight: bold;
-                        color: white;
-                    }
-                    .cache-event-check { background-color: #0073aa; }
-                    .cache-event-hit { background-color: #00a32a; }
-                    .cache-event-miss { background-color: #dba617; }
-                    .cache-event-store { background-color: #00a32a; }
-                    .cache-event-delete { background-color: #d63638; }
-                    .cache-event-bypass { background-color: #f56e28; }
-                    .cache-event-force_refresh { background-color: #0073aa; }
-                    .cache-event-clear_all { background-color: #d63638; }
-                    
-                    .cache-event-hit { background-color: #eafff0; }
-                    .cache-event-miss { background-color: #fff8e1; }
-                    .cache-event-store { background-color: #eafff0; }
-                    .cache-event-delete { background-color: #ffeaea; }
-                    .cache-event-bypass { background-color: #fff4e6; }
-                    </style>
-                <?php endif; ?>
-            <?php else: ?>
-                <p><em>Cache logging is disabled. Set AFSX_DEBUG_MODE to true in the plugin code to enable detailed cache logging.</em></p>
-            <?php endif; ?>
-        </div>
-        <?php
-    }
-    
     private function clear_cache($cache_key) {
-        $this->log_cache_event('delete', $cache_key, array('reason' => 'admin_manual_clear'));
         delete_transient($cache_key);
     }
     
     private function force_refresh($cache_key) {
         // Clear the cache and its timeout
-        $this->log_cache_event('delete', $cache_key, array('reason' => 'admin_force_refresh'));
         delete_transient($cache_key);
         
         // Extract username and count from cache key
@@ -1053,12 +845,6 @@ class AFSX_Feed {
             if (count($parts) >= 2) {
                 $count = array_pop($parts);
                 $username = implode('_', $parts);
-                
-                $this->log_cache_event('force_refresh', $cache_key, array(
-                    'username' => $username,
-                    'count' => (int)$count,
-                    'action' => 'admin_initiated'
-                ));
                 
                 // Force refresh by bypassing cache temporarily
                 $original_get = $_GET;
@@ -1075,8 +861,6 @@ class AFSX_Feed {
     
     private function clear_all_cache() {
         global $wpdb;
-        
-        $this->log_cache_event('clear_all', 'all_caches', array('action' => 'admin_clear_all'));
         
         // Clear all AFSX transients
         $feed_prefix = $wpdb->esc_like('_transient_' . AFSX_CACHE_PREFIX) . '%';
