@@ -492,6 +492,8 @@ class AFSX_Feed {
             
             <?php $this->render_cache_status(); ?>
             
+            <?php $this->render_debug_info(); ?>
+            
             <?php $this->render_api_logs(); ?>
             
         </div>
@@ -594,6 +596,74 @@ class AFSX_Feed {
             echo '</td>';
             echo '</tr>';
         }
+    }
+    
+    private function render_debug_info() {
+        global $wpdb;
+        ?>
+        <div class="afsx-debug-info">
+            <h3>Debug Information</h3>
+            
+            <h4>Cache Prefixes:</h4>
+            <ul>
+                <li><strong>Feed Cache:</strong> <code><?php echo AFSX_CACHE_PREFIX; ?></code></li>
+                <li><strong>User Cache:</strong> <code><?php echo AFSX_USER_CACHE_PREFIX; ?></code></li>
+                <li><strong>Error Cache:</strong> <code><?php echo AFSX_ERROR_CACHE_PREFIX; ?></code></li>
+            </ul>
+            
+            <h4>All AFSX Transients in Database:</h4>
+            <?php
+            $all_transients = $wpdb->get_results(
+                "SELECT option_name, option_value FROM {$wpdb->options} 
+                 WHERE option_name LIKE '%afsx%' AND option_name LIKE '%transient%'
+                 ORDER BY option_name"
+            );
+            
+            if (empty($all_transients)) {
+                echo '<p>No AFSX transients found in database.</p>';
+            } else {
+                echo '<table class="widefat" style="max-width: 800px;">';
+                echo '<thead><tr><th>Option Name</th><th>Value Type</th><th>Size</th></tr></thead><tbody>';
+                foreach ($all_transients as $transient) {
+                    $value = maybe_unserialize($transient->option_value);
+                    $type = gettype($value);
+                    if ($type === 'object') {
+                        $type .= ' (' . get_class($value) . ')';
+                    }
+                    $size = strlen($transient->option_value);
+                    echo '<tr>';
+                    echo '<td><code>' . esc_html($transient->option_name) . '</code></td>';
+                    echo '<td>' . esc_html($type) . '</td>';
+                    echo '<td>' . esc_html($size) . ' bytes</td>';
+                    echo '</tr>';
+                }
+                echo '</tbody></table>';
+            }
+            ?>
+            
+            <h4>Recent Error Messages:</h4>
+            <?php
+            $logs = get_option(AFSX_LOG_OPTION, array());
+            $errors = array_filter(array_slice($logs, 0, 5), function($log) {
+                return $log['http_code'] >= 400;
+            });
+            
+            if (empty($errors)) {
+                echo '<p>No recent API errors.</p>';
+            } else {
+                foreach ($errors as $error) {
+                    echo '<div style="background: #ffeaea; padding: 10px; margin: 5px 0; border-left: 4px solid #dc3232;">';
+                    echo '<strong>HTTP ' . $error['http_code'] . '</strong> at ' . date('M j, H:i:s', $error['timestamp']);
+                    echo '<br>Endpoint: <code>' . str_replace(AFSX_API_BASE_URL, '', $error['url']) . '</code>';
+                    if ($error['rate_limit_remaining'] !== null) {
+                        echo '<br>Rate Limit Remaining: ' . $error['rate_limit_remaining'];
+                    }
+                    echo '</div>';
+                }
+            }
+            ?>
+        </div>
+        <?php
     }
     
     private function render_api_logs() {
