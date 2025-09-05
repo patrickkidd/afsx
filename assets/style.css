@@ -165,42 +165,40 @@
     }
 }
 
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-    .afsx-timeline {
-        background: #15202b;
-        border-color: #38444d;
-    }
-    
-    .afsx-tweet {
-        border-color: #38444d;
-    }
-    
-    .afsx-tweet:hover {
-        background-color: #1e2732;
-    }
-    
-    .afsx-display-name,
-    .afsx-tweet-text,
-    .afsx-metric-count {
-        color: #ffffff;
-    }
-    
-    .afsx-username,
-    .afsx-date,
-    .afsx-tweet-metrics {
-        color: #8899a6;
-    }
-    
-    .afsx-avatar {
-        background: #38444d;
-    }
-    
-    .afsx-error {
-        background-color: #2d1b20;
-        border-color: #8b3a3a;
-        color: #ff6b9d;
-    }
+/* Dark mode support - only enabled with .afsx-dark-theme class on parent container */
+.afsx-dark-theme .afsx-timeline {
+    background: #15202b;
+    border-color: #38444d;
+}
+
+.afsx-dark-theme .afsx-tweet {
+    border-color: #38444d;
+}
+
+.afsx-dark-theme .afsx-tweet:hover {
+    background-color: #1e2732;
+}
+
+.afsx-dark-theme .afsx-display-name,
+.afsx-dark-theme .afsx-tweet-text,
+.afsx-dark-theme .afsx-metric-count {
+    color: #ffffff;
+}
+
+.afsx-dark-theme .afsx-username,
+.afsx-dark-theme .afsx-date,
+.afsx-dark-theme .afsx-tweet-metrics {
+    color: #8899a6;
+}
+
+.afsx-dark-theme .afsx-avatar {
+    background: #38444d;
+}
+
+.afsx-dark-theme .afsx-error {
+    background-color: #2d1b20;
+    border-color: #8b3a3a;
+    color: #ff6b9d;
 }
 
 /* Loading and empty states */
