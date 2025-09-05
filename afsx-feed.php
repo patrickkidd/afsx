@@ -614,9 +614,21 @@ class AFSX_Feed {
             
             <h4>All AFSX Transients in Database:</h4>
             <?php
+            $feed_prefix = $wpdb->esc_like('_transient_' . AFSX_CACHE_PREFIX) . '%';
+            $feed_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_CACHE_PREFIX) . '%';
+            $user_prefix = $wpdb->esc_like('_transient_' . AFSX_USER_CACHE_PREFIX) . '%';
+            $user_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_USER_CACHE_PREFIX) . '%';
+            $error_prefix = $wpdb->esc_like('_transient_' . AFSX_ERROR_CACHE_PREFIX) . '%';
+            $error_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_ERROR_CACHE_PREFIX) . '%';
+            
             $all_transients = $wpdb->get_results(
                 "SELECT option_name, option_value FROM {$wpdb->options} 
-                 WHERE option_name LIKE '%afsx%' AND option_name LIKE '%transient%'
+                 WHERE option_name LIKE '{$feed_prefix}' 
+                    OR option_name LIKE '{$feed_timeout_prefix}'
+                    OR option_name LIKE '{$user_prefix}' 
+                    OR option_name LIKE '{$user_timeout_prefix}'
+                    OR option_name LIKE '{$error_prefix}' 
+                    OR option_name LIKE '{$error_timeout_prefix}'
                  ORDER BY option_name"
             );
             
