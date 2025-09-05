@@ -532,15 +532,16 @@ class AFSX_Feed {
         global $wpdb;
         
         // Get all transients that match our prefixes
+        $feed_prefix = $wpdb->esc_like('_transient_' . AFSX_CACHE_PREFIX) . '%';
+        $user_prefix = $wpdb->esc_like('_transient_' . AFSX_USER_CACHE_PREFIX) . '%';
+        $error_prefix = $wpdb->esc_like('_transient_' . AFSX_ERROR_CACHE_PREFIX) . '%';
+        
         $transients = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT option_name, option_value FROM {$wpdb->options} 
-                 WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s
-                 ORDER BY option_name",
-                '_transient_' . AFSX_CACHE_PREFIX . '%',
-                '_transient_' . AFSX_USER_CACHE_PREFIX . '%',
-                '_transient_' . AFSX_ERROR_CACHE_PREFIX . '%'
-            )
+            "SELECT option_name, option_value FROM {$wpdb->options} 
+             WHERE option_name LIKE '{$feed_prefix}' 
+                OR option_name LIKE '{$user_prefix}' 
+                OR option_name LIKE '{$error_prefix}'
+             ORDER BY option_name"
         );
         
         if (empty($transients)) {
@@ -740,18 +741,21 @@ class AFSX_Feed {
         global $wpdb;
         
         // Clear all AFSX transients
+        $feed_prefix = $wpdb->esc_like('_transient_' . AFSX_CACHE_PREFIX) . '%';
+        $feed_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_CACHE_PREFIX) . '%';
+        $user_prefix = $wpdb->esc_like('_transient_' . AFSX_USER_CACHE_PREFIX) . '%';
+        $user_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_USER_CACHE_PREFIX) . '%';
+        $error_prefix = $wpdb->esc_like('_transient_' . AFSX_ERROR_CACHE_PREFIX) . '%';
+        $error_timeout_prefix = $wpdb->esc_like('_transient_timeout_' . AFSX_ERROR_CACHE_PREFIX) . '%';
+        
         $wpdb->query(
-            $wpdb->prepare(
-                "DELETE FROM {$wpdb->options} 
-                 WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s
-                    OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s",
-                '_transient_' . AFSX_CACHE_PREFIX . '%',
-                '_transient_timeout_' . AFSX_CACHE_PREFIX . '%',
-                '_transient_' . AFSX_USER_CACHE_PREFIX . '%',
-                '_transient_timeout_' . AFSX_USER_CACHE_PREFIX . '%',
-                '_transient_' . AFSX_ERROR_CACHE_PREFIX . '%',
-                '_transient_timeout_' . AFSX_ERROR_CACHE_PREFIX . '%'
-            )
+            "DELETE FROM {$wpdb->options} 
+             WHERE option_name LIKE '{$feed_prefix}' 
+                OR option_name LIKE '{$feed_timeout_prefix}'
+                OR option_name LIKE '{$user_prefix}' 
+                OR option_name LIKE '{$user_timeout_prefix}'
+                OR option_name LIKE '{$error_prefix}' 
+                OR option_name LIKE '{$error_timeout_prefix}'"
         );
     }
 }
