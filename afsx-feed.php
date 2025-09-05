@@ -15,7 +15,9 @@ if (!defined('ABSPATH')) {
 
 // Plugin Configuration Constants
 define('AFSX_PLUGIN_VERSION', '1.0.0');
-define('AFSX_DEFAULT_CACHE_DURATION', 300); // 5 minutes in seconds
+define('AFSX_DEFAULT_CACHE_DURATION', 900); // 15 minutes in seconds
+define('AFSX_ERROR_CACHE_DURATION', 300); // 5 minutes for errors
+define('AFSX_USER_ID_CACHE_DURATION', 86400); // 24 hours for user ID mapping
 define('AFSX_DEFAULT_TWEET_COUNT', 5);
 define('AFSX_MAX_TWEET_COUNT', 100);
 define('AFSX_API_BASE_URL', 'https://api.twitter.com/2');
@@ -42,6 +44,12 @@ define('AFSX_EXPANSIONS', 'author_id');
 
 // Cache Configuration
 define('AFSX_CACHE_PREFIX', 'afsx_feed_');
+define('AFSX_USER_CACHE_PREFIX', 'afsx_user_');
+define('AFSX_ERROR_CACHE_PREFIX', 'afsx_error_');
+
+// Logging Configuration
+define('AFSX_LOG_OPTION', 'afsx_api_logs');
+define('AFSX_MAX_LOG_ENTRIES', 100);
 
 class AFSX_Feed {
     
@@ -82,16 +90,31 @@ class AFSX_Feed {
     
     private function get_cached_feed($username, $count, $cache_time) {
         $cache_key = AFSX_CACHE_PREFIX . $username . '_' . $count;
-        $cached_data = get_transient($cache_key);
+        $error_cache_key = AFSX_ERROR_CACHE_PREFIX . $username . '_' . $count;
         
+        // Check for successful cached data first
+        $cached_data = get_transient($cache_key);
         if ($cached_data !== false) {
             return $cached_data;
         }
         
+        // Check for cached errors to prevent rapid retries
+        $cached_error = get_transient($error_cache_key);
+        if ($cached_error !== false) {
+            return $cached_error;
+        }
+        
         $feed_data = $this->fetch_x_feed($username, $count);
         
-        if (!is_wp_error($feed_data)) {
+        if (is_wp_error($feed_data)) {
+            // Cache errors for shorter duration to prevent retry storms
+            $error_code = $feed_data->get_error_code();
+            $cache_duration = ($error_code === 'api_error_429') ? AFSX_ERROR_CACHE_DURATION * 2 : AFSX_ERROR_CACHE_DURATION;
+            set_transient($error_cache_key, $feed_data, $cache_duration);
+        } else {
+            // Cache successful data and clear any error cache
             set_transient($cache_key, $feed_data, $cache_time);
+            delete_transient($error_cache_key);
         }
         
         return $feed_data;
@@ -107,22 +130,30 @@ class AFSX_Feed {
             return new WP_Error('missing_credentials', 'X API credentials are not configured. Please check the plugin settings.');
         }
         
-        $url = AFSX_API_BASE_URL . '/users/by/username/' . $username;
+        // Check for cached user ID first
+        $user_cache_key = AFSX_USER_CACHE_PREFIX . $username;
+        $user_id = get_transient($user_cache_key);
         
-        // First, get user ID
-        $user_response = $this->make_api_request($url, array(), $api_key, $api_secret, $access_token, $access_token_secret);
-        
-        if (is_wp_error($user_response)) {
-            return $user_response;
+        if ($user_id === false) {
+            // User ID not cached, fetch it
+            $url = AFSX_API_BASE_URL . '/users/by/username/' . $username;
+            $user_response = $this->make_api_request($url, array(), $api_key, $api_secret, $access_token, $access_token_secret);
+            
+            if (is_wp_error($user_response)) {
+                return $user_response;
+            }
+            
+            $user_data = json_decode($user_response, true);
+            
+            if (!isset($user_data['data']['id'])) {
+                return new WP_Error('user_not_found', 'User not found: ' . $username);
+            }
+            
+            $user_id = $user_data['data']['id'];
+            
+            // Cache user ID for 24 hours
+            set_transient($user_cache_key, $user_id, AFSX_USER_ID_CACHE_DURATION);
         }
-        
-        $user_data = json_decode($user_response, true);
-        
-        if (!isset($user_data['data']['id'])) {
-            return new WP_Error('user_not_found', 'User not found: ' . $username);
-        }
-        
-        $user_id = $user_data['data']['id'];
         
         // Get user tweets
         $tweets_url = AFSX_API_BASE_URL . '/users/' . $user_id . '/tweets';
@@ -161,20 +192,51 @@ class AFSX_Feed {
         
         $options = array(
             CURLOPT_HTTPHEADER => $header,
-            CURLOPT_HEADER => false,
+            CURLOPT_HEADER => true,
             CURLOPT_URL => $url . '?' . http_build_query($params),
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_SSL_VERIFYPEER => false,
         );
         
+        $start_time = microtime(true);
         $feed = curl_init();
         curl_setopt_array($feed, $options);
-        $json = curl_exec($feed);
+        $response = curl_exec($feed);
         $http_code = curl_getinfo($feed, CURLINFO_HTTP_CODE);
+        $header_size = curl_getinfo($feed, CURLINFO_HEADER_SIZE);
         curl_close($feed);
+        $end_time = microtime(true);
+        
+        // Separate headers and body
+        $headers = substr($response, 0, $header_size);
+        $json = substr($response, $header_size);
+        
+        // Log the API request
+        $this->log_api_request($url, $http_code, $end_time - $start_time, $headers);
         
         if ($http_code !== 200) {
-            return new WP_Error('api_error', 'API request failed with code: ' . $http_code);
+            $error_code = 'api_error';
+            $error_message = 'API request failed with code: ' . $http_code;
+            
+            // Special handling for rate limiting
+            if ($http_code === 429) {
+                $error_code = 'api_error_429';
+                $error_message = 'Rate limit exceeded. Please wait before making more requests.';
+                
+                // Extract rate limit headers if available
+                if (preg_match('/x-rate-limit-remaining:\s*(\d+)/i', $headers, $matches)) {
+                    $remaining = $matches[1];
+                    if ($remaining == 0) {
+                        if (preg_match('/x-rate-limit-reset:\s*(\d+)/i', $headers, $reset_matches)) {
+                            $reset_time = $reset_matches[1];
+                            $wait_time = $reset_time - time();
+                            $error_message .= ' Rate limit resets in ' . max(1, $wait_time) . ' seconds.';
+                        }
+                    }
+                }
+            }
+            
+            return new WP_Error($error_code, $error_message);
         }
         
         return $json;
@@ -197,6 +259,39 @@ class AFSX_Feed {
         }
         $r .= implode(', ', $values);
         return $r;
+    }
+    
+    private function log_api_request($url, $http_code, $response_time, $headers) {
+        $logs = get_option(AFSX_LOG_OPTION, array());
+        
+        // Extract rate limit info from headers
+        $rate_limit_remaining = null;
+        $rate_limit_reset = null;
+        if (preg_match('/x-rate-limit-remaining:\s*(\d+)/i', $headers, $matches)) {
+            $rate_limit_remaining = (int)$matches[1];
+        }
+        if (preg_match('/x-rate-limit-reset:\s*(\d+)/i', $headers, $matches)) {
+            $rate_limit_reset = (int)$matches[1];
+        }
+        
+        $log_entry = array(
+            'timestamp' => time(),
+            'url' => $url,
+            'http_code' => $http_code,
+            'response_time' => round($response_time * 1000, 2), // Convert to milliseconds
+            'rate_limit_remaining' => $rate_limit_remaining,
+            'rate_limit_reset' => $rate_limit_reset,
+        );
+        
+        // Add to beginning of array
+        array_unshift($logs, $log_entry);
+        
+        // Keep only the most recent entries
+        if (count($logs) > AFSX_MAX_LOG_ENTRIES) {
+            $logs = array_slice($logs, 0, AFSX_MAX_LOG_ENTRIES);
+        }
+        
+        update_option(AFSX_LOG_OPTION, $logs);
     }
     
     private function render_feed($feed_data) {
@@ -360,6 +455,20 @@ class AFSX_Feed {
     }
     
     public function admin_page() {
+        // Handle cache clearing actions
+        if (isset($_POST['clear_cache'])) {
+            $this->clear_cache($_POST['cache_key']);
+            echo '<div class="notice notice-success"><p>Cache cleared successfully.</p></div>';
+        }
+        if (isset($_POST['clear_all_cache'])) {
+            $this->clear_all_cache();
+            echo '<div class="notice notice-success"><p>All caches cleared successfully.</p></div>';
+        }
+        if (isset($_POST['clear_logs'])) {
+            delete_option(AFSX_LOG_OPTION);
+            echo '<div class="notice notice-success"><p>API logs cleared successfully.</p></div>';
+        }
+        
         ?>
         <div class="wrap">
             <h1>AFSX Feed Settings</h1>
@@ -370,6 +479,7 @@ class AFSX_Feed {
                 submit_button();
                 ?>
             </form>
+            
             <div class="afsx-usage">
                 <h3>Usage</h3>
                 <p>Use the <code>[afsx]</code> shortcode to display X feeds:</p>
@@ -379,8 +489,200 @@ class AFSX_Feed {
                     <li><code>[afsx username="twitter" count="5" cache_time="600"]</code> - Cache for 10 minutes</li>
                 </ul>
             </div>
+            
+            <?php $this->render_cache_status(); ?>
+            
+            <?php $this->render_api_logs(); ?>
+            
         </div>
         <?php
+    }
+    
+    private function render_cache_status() {
+        ?>
+        <div class="afsx-cache-status">
+            <h3>Cache Status</h3>
+            <form method="post" style="display: inline;">
+                <input type="submit" name="clear_all_cache" value="Clear All Cache" class="button" 
+                       onclick="return confirm('Are you sure you want to clear all cached data?');" />
+            </form>
+            <table class="widefat">
+                <thead>
+                    <tr>
+                        <th>Type</th>
+                        <th>Key</th>
+                        <th>Status</th>
+                        <th>Age</th>
+                        <th>Expires In</th>
+                        <th>Last Tweet</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php $this->render_cache_entries(); ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+    
+    private function render_cache_entries() {
+        global $wpdb;
+        
+        // Get all transients that match our prefixes
+        $transients = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT option_name, option_value FROM {$wpdb->options} 
+                 WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s
+                 ORDER BY option_name",
+                '_transient_' . AFSX_CACHE_PREFIX . '%',
+                '_transient_' . AFSX_USER_CACHE_PREFIX . '%',
+                '_transient_' . AFSX_ERROR_CACHE_PREFIX . '%'
+            )
+        );
+        
+        if (empty($transients)) {
+            echo '<tr><td colspan="7">No cached data found.</td></tr>';
+            return;
+        }
+        
+        foreach ($transients as $transient) {
+            $key = str_replace('_transient_', '', $transient->option_name);
+            $data = maybe_unserialize($transient->option_value);
+            
+            $type = 'Feed';
+            if (strpos($key, AFSX_USER_CACHE_PREFIX) === 0) {
+                $type = 'User ID';
+            } elseif (strpos($key, AFSX_ERROR_CACHE_PREFIX) === 0) {
+                $type = 'Error';
+            }
+            
+            // Get timeout
+            $timeout_key = '_transient_timeout_' . $key;
+            $timeout = get_option($timeout_key, 0);
+            $expires_in = $timeout ? max(0, $timeout - time()) : 0;
+            $age = $timeout ? time() - ($timeout - ($type === 'User ID' ? AFSX_USER_ID_CACHE_DURATION : ($type === 'Error' ? AFSX_ERROR_CACHE_DURATION : AFSX_DEFAULT_CACHE_DURATION))) : 'Unknown';
+            
+            $status = 'Valid';
+            $last_tweet = 'N/A';
+            
+            if ($type === 'Error') {
+                $status = 'Error Cached';
+            } elseif ($type === 'Feed' && is_array($data) && isset($data['data'])) {
+                if (!empty($data['data'])) {
+                    $latest_tweet = $data['data'][0];
+                    if (isset($latest_tweet['created_at'])) {
+                        $last_tweet = date('M j, Y H:i', strtotime($latest_tweet['created_at']));
+                    }
+                } else {
+                    $status = 'Empty Feed';
+                }
+            }
+            
+            echo '<tr>';
+            echo '<td>' . esc_html($type) . '</td>';
+            echo '<td><code>' . esc_html($key) . '</code></td>';
+            echo '<td>' . esc_html($status) . '</td>';
+            echo '<td>' . (is_numeric($age) ? human_time_diff($age, time()) . ' ago' : $age) . '</td>';
+            echo '<td>' . ($expires_in > 0 ? human_time_diff(time(), time() + $expires_in) : 'Expired') . '</td>';
+            echo '<td>' . esc_html($last_tweet) . '</td>';
+            echo '<td>';
+            echo '<form method="post" style="display: inline;">';
+            echo '<input type="hidden" name="cache_key" value="' . esc_attr($key) . '" />';
+            echo '<input type="submit" name="clear_cache" value="Clear" class="button-secondary" />';
+            echo '</form>';
+            echo '</td>';
+            echo '</tr>';
+        }
+    }
+    
+    private function render_api_logs() {
+        $logs = get_option(AFSX_LOG_OPTION, array());
+        ?>
+        <div class="afsx-api-logs">
+            <h3>API Request Log</h3>
+            <form method="post" style="display: inline;">
+                <input type="submit" name="clear_logs" value="Clear Logs" class="button" 
+                       onclick="return confirm('Are you sure you want to clear all API logs?');" />
+            </form>
+            <p>Showing last <?php echo count($logs); ?> requests (max <?php echo AFSX_MAX_LOG_ENTRIES; ?>):</p>
+            
+            <?php if (empty($logs)): ?>
+                <p>No API requests logged yet.</p>
+            <?php else: ?>
+                <table class="widefat">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Endpoint</th>
+                            <th>Status</th>
+                            <th>Response Time</th>
+                            <th>Rate Limit Remaining</th>
+                            <th>Rate Limit Reset</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach (array_slice($logs, 0, 20) as $log): ?>
+                            <tr class="<?php echo $log['http_code'] >= 400 ? 'error-row' : 'success-row'; ?>">
+                                <td><?php echo date('M j, H:i:s', $log['timestamp']); ?></td>
+                                <td>
+                                    <code><?php 
+                                        $endpoint = str_replace(AFSX_API_BASE_URL, '', $log['url']);
+                                        echo esc_html($endpoint);
+                                    ?></code>
+                                </td>
+                                <td>
+                                    <span class="status-<?php echo $log['http_code']; ?>">
+                                        <?php echo $log['http_code']; ?>
+                                    </span>
+                                </td>
+                                <td><?php echo $log['response_time']; ?>ms</td>
+                                <td><?php echo $log['rate_limit_remaining'] !== null ? $log['rate_limit_remaining'] : 'N/A'; ?></td>
+                                <td><?php 
+                                    if ($log['rate_limit_reset']) {
+                                        echo date('H:i:s', $log['rate_limit_reset']);
+                                    } else {
+                                        echo 'N/A';
+                                    }
+                                ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+                
+                <style>
+                .error-row { background-color: #ffeaea; }
+                .success-row { background-color: #eafff0; }
+                .status-200 { color: green; font-weight: bold; }
+                .status-429 { color: red; font-weight: bold; }
+                .status-404 { color: orange; font-weight: bold; }
+                </style>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+    
+    private function clear_cache($cache_key) {
+        delete_transient($cache_key);
+    }
+    
+    private function clear_all_cache() {
+        global $wpdb;
+        
+        // Clear all AFSX transients
+        $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$wpdb->options} 
+                 WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s
+                    OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s",
+                '_transient_' . AFSX_CACHE_PREFIX . '%',
+                '_transient_timeout_' . AFSX_CACHE_PREFIX . '%',
+                '_transient_' . AFSX_USER_CACHE_PREFIX . '%',
+                '_transient_timeout_' . AFSX_USER_CACHE_PREFIX . '%',
+                '_transient_' . AFSX_ERROR_CACHE_PREFIX . '%',
+                '_transient_timeout_' . AFSX_ERROR_CACHE_PREFIX . '%'
+            )
+        );
     }
 }
 
